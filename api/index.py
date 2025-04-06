@@ -7,6 +7,8 @@ import os
 import json
 from playwright.async_api import async_playwright
 from playwright.async_api._generated import Page, Browser, BrowserContext
+import traceback
+import sys
 
 app = FastAPI(
     title="Facebook Post Scraper API",
@@ -36,18 +38,20 @@ async def initialize_browser():
     if is_browser_initialized:
         return
     
-    playwright = await async_playwright().start()
-    
-    # Use headless browser with detection avoidance configurations
-    browser = await playwright.chromium.launch(
-        headless=True,  
-        args=[
+    try:
+        playwright = await async_playwright().start()
+        
+        print("Starting browser initialization...")
+        # Check if we're in Vercel environment
+        is_vercel = os.environ.get("VERCEL", "false") == "true"
+        
+        # Custom browser launch arguments based on environment
+        browser_args = [
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-web-security',
             '--disable-features=IsolateOrigins,site-per-process',
             '--window-size=1920,1080',
-            # Additional args to avoid detection
             '--disable-dev-shm-usage',
             '--disable-infobars',
             '--disable-background-networking',
@@ -64,81 +68,129 @@ async def initialize_browser():
             '--metrics-recording-only',
             '--mute-audio',
         ]
-    )
-    
-    # Create a context with more realistic browser parameters
-    browser_context = await browser.new_context(
-        viewport={"width": 1920, "height": 1080},
-        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        is_mobile=False,
-        has_touch=False,
-        locale='en-US',
-        timezone_id='America/New_York',
-        color_scheme='light',
-        java_script_enabled=True,
-        bypass_csp=True,
-    )
-    
-    # Enable JavaScript console logging
-    browser_context.on('console', lambda msg: print(f'BROWSER LOG: {msg.text}'))
-    
-    # Add anti-detection script
-    await browser_context.add_init_script('''() => {
-        // Overwrite the 'webdriver' property to undefined
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
         
-        // Overwrite the chrome driver related properties
-        window.navigator.chrome = { runtime: {} };
+        if is_vercel:
+            # Additional args for Vercel serverless environment
+            browser_args.extend([
+                '--single-process',
+                '--no-zygote'
+            ])
         
-        // Overwrite the permissions API
-        window.navigator.permissions = {
-            query: () => Promise.resolve({ state: 'granted' })
-        };
+        print("Launching browser with arguments:", browser_args)
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=browser_args
+        )
         
-        // Add missing plugins that a normal browser would have
-        const originalPlugins = navigator.plugins;
-        const pluginsData = [
-            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-            { name: 'Native Client', filename: 'internal-nacl-plugin' }
-        ];
+        print("Browser launched successfully, creating context...")
+        # Create a context with more realistic browser parameters
+        browser_context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            is_mobile=False,
+            has_touch=False,
+            locale='en-US',
+            timezone_id='America/New_York',
+            color_scheme='light',
+            java_script_enabled=True,
+            bypass_csp=True,
+        )
         
-        // Define a new plugins property
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => {
-                const plugins = { 
-                    ...originalPlugins,
-                    length: pluginsData.length 
-                };
-                
-                // Add the missing plugins
-                pluginsData.forEach((plugin, i) => {
-                    plugins[i] = plugin;
-                });
-                
-                return plugins;
+        # Enable JavaScript console logging
+        browser_context.on('console', lambda msg: print(f'BROWSER LOG: {msg.text}'))
+        
+        # Add anti-detection script
+        await browser_context.add_init_script('''() => {
+            // Overwrite the 'webdriver' property to undefined
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Overwrite the chrome driver related properties
+            window.navigator.chrome = { runtime: {} };
+            
+            // Overwrite the permissions API
+            window.navigator.permissions = {
+                query: () => Promise.resolve({ state: 'granted' })
+            };
+            
+            // Add missing plugins that a normal browser would have
+            const originalPlugins = navigator.plugins;
+            const pluginsData = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin' }
+            ];
+            
+            // Define a new plugins property
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => {
+                    const plugins = { 
+                        ...originalPlugins,
+                        length: pluginsData.length 
+                    };
+                    
+                    // Add the missing plugins
+                    pluginsData.forEach((plugin, i) => {
+                        plugins[i] = plugin;
+                    });
+                    
+                    return plugins;
+                }
+            });
+            
+            // Fake the language property
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            
+            // Fake the platform to match a Mac
+            Object.defineProperty(navigator, 'platform', {
+                get: () => 'MacIntel'
+            });
+            
+            // Add a fake notification API
+            if (window.Notification) {
+                window.Notification.permission = 'default';
             }
-        });
+        }''')
         
-        // Fake the language property
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
-        
-        // Fake the platform to match a Mac
-        Object.defineProperty(navigator, 'platform', {
-            get: () => 'MacIntel'
-        });
-        
-        // Add a fake notification API
-        if (window.Notification) {
-            window.Notification.permission = 'default';
-        }
-    }''')
+        is_browser_initialized = True
+        print("Browser initialization complete")
     
-    is_browser_initialized = True
+    except Exception as e:
+        print(f"Browser initialization failed: {str(e)}")
+        print(f"Python version: {sys.version}")
+        print(f"System path: {sys.path}")
+        
+        # Full traceback for debugging
+        traceback_str = traceback.format_exc()
+        print(f"Full traceback: {traceback_str}")
+        
+        # Try to get more information about the environment
+        try:
+            import os
+            print(f"Current working directory: {os.getcwd()}")
+            print(f"Directory contents: {os.listdir()}")
+            
+            # Check if we're in Vercel
+            print(f"Is this Vercel? {os.environ.get('VERCEL', 'Not defined')}")
+            
+            # Check where Playwright is installed
+            try:
+                import playwright
+                print(f"Playwright path: {playwright.__file__}")
+                print(f"Playwright version: {playwright.__version__}")
+            except Exception as pe:
+                print(f"Playwright import error: {str(pe)}")
+                
+        except Exception as oe:
+            print(f"Environment inspection error: {str(oe)}")
+            
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Browser initialization failed: {str(e)}\nTraceback: {traceback_str}"
+        )
 
 async def login_to_facebook(page):
     # Step 1: Login to Facebook
@@ -440,9 +492,24 @@ async def scrape_post(post_url):
         return formatted_data
 
     except Exception as e:
-        # Close the page in case of error
-        await page.close()
-        raise HTTPException(status_code=500, detail=f"Error scraping post: {str(e)}")
+        # Close the page and browser in case of error
+        try:
+            if page:
+                await page.close()
+        except:
+            pass
+        
+        # Get full traceback for debugging
+        error_details = str(e)
+        error_trace = traceback.format_exc()
+        
+        print(f"Error scraping post: {error_details}")
+        print(f"Traceback: {error_trace}")
+        
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error scraping post: {error_details}\nTraceback: {error_trace}"
+        )
 
 @app.post("/api/scrape-facebook-post")
 async def scrape_facebook_post(request: PostRequest):
